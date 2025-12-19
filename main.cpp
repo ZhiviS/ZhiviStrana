@@ -28,9 +28,8 @@
 #include <iostream>
 #include <vector>
 #include <csignal>
-#include <algorithm> // 把这行加在这里
+#include <algorithm>
 
-// 8891689_FIX: 引入 CUDA runtime 頭文件以檢查 GPU 設備
 #include <cuda_runtime.h> 
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -42,7 +41,7 @@
 #include <stdlib.h>
 #endif
 
-// ------------------- 修改鍵盤監聽和全局變量  -------------------
+// --------------------------------------
 std::atomic<bool> Pause(false);
 std::atomic<bool> Paused(false);
 std::atomic<bool> stopMonitorKey(false);
@@ -117,7 +116,7 @@ void monitorKeypress() {
 }
 #endif
 
-// ------------------- 修改輔助函數 -------------------
+// --------------------------------------
 
 void printHelp() {
     printf("Usage: ./kk -r <bits> [-a <b58_addr> | -p <pubkey> | -i <file>] [options]\n\n");
@@ -164,7 +163,7 @@ bool loadBackup(int& idxcount, double& t_Paused, int gpuid) {
     return false;
 }
 
-// ------------------- Main 函數 (核心修改區) -------------------
+// ------------------- Main -------------------
 
 int main(int argc, char* argv[]) {
     signal(SIGINT, signalHandler);
@@ -185,12 +184,11 @@ int main(int argc, char* argv[]) {
     
     string target_address;
     string target_pubkey;
-    string input_filename; // 用於存儲 -i 參數的文件名
+    string input_filename;
     int bits = 0;
-    int gpuId = 0; // 默認使用 GPU 0
+    int gpuId = 0; // GPU 0
     uint32_t maxFound = 65536 * 4;
 
-    // 參數解析循環
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -205,7 +203,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-p") {
             if (i + 1 < argc) { target_pubkey = argv[++i]; }
             else { fprintf(stderr, "[ERROR] A public key hex string is required after the -p parameter.\n"); exit(-1); }
-        } else if (arg == "-i") { // 處理 -i 參數
+        } else if (arg == "-i") {
             if (i + 1 < argc) { input_filename = argv[++i]; }
             else { fprintf(stderr, "[ERROR] A filename is required after the -i parameter.\n"); exit(-1); }
         } else if (arg == "-r") {
@@ -221,7 +219,6 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // 參數驗證邏輯
     if ((target_address.empty() && target_pubkey.empty() && input_filename.empty()) || bits == 0) {
         fprintf(stderr, "[ERROR] A target source (-a, -p, or -i) and range (-r) must be specified.\n");
         printHelp();
@@ -264,15 +261,15 @@ int main(int argc, char* argv[]) {
     string search_target_display; 
 
     if (!input_filename.empty()) {
-        // 從文件讀取目標
-        ifstream infile(input_filename.c_str()); //  核心修正
+
+        ifstream infile(input_filename.c_str());
         if (!infile.is_open()) {
             fprintf(stderr, "[ERROR] Could not open target file: %s\n", input_filename.c_str());
             exit(-1);
         }
         string line;
         while (getline(infile, line)) {
-            // 簡單處理，移除可能的空行或僅包含空白的行
+
             if (!line.empty() && line.find_first_not_of(" \t\r\n") != string::npos) {
                 target_vector.push_back(line);
             }
@@ -284,7 +281,6 @@ int main(int argc, char* argv[]) {
             exit(-1);
         }
         
-        // 在處理前對原始地址/公鑰字符串列表進行去重
         printf("[+] Original targets from file: %zu\n", target_vector.size());
         std::sort(target_vector.begin(), target_vector.end());
         auto last = std::unique(target_vector.begin(), target_vector.end());
@@ -294,11 +290,11 @@ int main(int argc, char* argv[]) {
         search_target_display = "from file '" + input_filename + "'";
 
     } else if (!target_pubkey.empty()) {
-        // 單個公鑰目標
+
         target_vector.push_back(target_pubkey);
         search_target_display = target_pubkey;
     } else {
-        // 單個地址目標
+
         target_vector.push_back(target_address);
         search_target_display = target_address;
     }
