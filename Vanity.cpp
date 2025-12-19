@@ -27,7 +27,7 @@
 #include "hash/ripemd160.h"
 #include <string.h>
 #include <math.h>
-#include <algorithm> // 8891689_FIX: 包含 algorithm 以使用 std::all_of 和 std::reverse
+#include <algorithm>
 #include <thread>
 #include <atomic>
 #include <ctime> 
@@ -36,11 +36,10 @@
 #include <cmath>
 #include <iomanip>
 #include <sstream>
-#include <cctype>      // 8891689_FIX: 包含 cctype 以使用 isxdigit
+#include <cctype>
 
 using namespace std;
 
-// 8891689_MOD: 構造函數的輸入參數名改為 targets 以反映其通用性
 VanitySearch::VanitySearch(Secp256K1* secp, std::vector<std::string>& targets, int searchMode,
     bool stop, std::string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc) : inputAddresses(targets)
 {
@@ -69,9 +68,8 @@ VanitySearch::VanitySearch(Secp256K1* secp, std::vector<std::string>& targets, i
 	for (int i = 0; i < (int)targets.size(); i++) 
 	{
 		ADDRESS_ITEM it;
-		if (initAddress(targets[i], &it, i)) { //  傳入 i
+		if (initAddress(targets[i], &it, i)) {
 		
-                        // 正常地址處理邏輯
 			bool* found = new bool;
 			*found = false;
 			it.found = found;
@@ -87,7 +85,7 @@ VanitySearch::VanitySearch(Secp256K1* secp, std::vector<std::string>& targets, i
 			onlyFull &= it.isFull;
 			nbAddress++;
 		}
-        // 8891689_MOD: 如果是公鑰模式，我們仍然需要計數以啟動搜索
+
         else if (this->searchType == PUBKEY) {
             nbAddress++; 
             onlyFull = false; 
@@ -100,17 +98,16 @@ VanitySearch::VanitySearch(Secp256K1* secp, std::vector<std::string>& targets, i
 		exit(-1);
 	}
 
-    //  新增區塊 
     if (this->searchType == PUBKEY) {
         //printf("[INFO] Original public key targets: %zu\n", targetPubKeys.size());
-        // 1. 排序
+
         std::sort(targetPubKeys.begin(), targetPubKeys.end());
-        // 2. 使用 std::unique 將重複項移動到末尾，並返回指向第一個重複項的迭代器
+
         auto last = std::unique(targetPubKeys.begin(), targetPubKeys.end());
-        // 3. 刪除所有重複項
+
         targetPubKeys.erase(last, targetPubKeys.end());
         //printf("[INFO] Unique public key targets after deduplication: %zu\n", targetPubKeys.size());
-        // 更新目標計數
+
         nbAddress = targetPubKeys.size();
     }
 
@@ -135,7 +132,6 @@ VanitySearch::VanitySearch(Secp256K1* secp, std::vector<std::string>& targets, i
 	lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
 }
 
-// 8891689_MOD: 新增時間格式化輔助函數
 string VanitySearch::format_time_long(double seconds) {
     if (seconds < 1.0 || !isfinite(seconds)) return "soon";
     if (seconds < 60.0) return "seconds";
@@ -160,11 +156,8 @@ bool VanitySearch::isSingularAddress(std::string pref) {
 	return only1;
 }
 
-
-// 8891689_MOD:  重寫 initAddress 函數以清晰地處理公鑰和地址
 bool VanitySearch::initAddress(std::string& address, ADDRESS_ITEM* it, int index) {
 
-    // --- 步驟 1: 優先檢測是否為十六進制公鑰格式 ---
     bool isHex = address.length() > 0 && std::all_of(address.cbegin(), address.cend(), [](char c){ return std::isxdigit(c); });
     bool isCompressedPubKey = isHex && address.length() == 66 && (address.substr(0, 2) == "02" || address.substr(0, 2) == "03");
     bool isUncompressedPubKey = isHex && address.length() == 130 && address.substr(0, 2) == "04";
@@ -212,7 +205,6 @@ bool VanitySearch::initAddress(std::string& address, ADDRESS_ITEM* it, int index
         return false;
     }
 
-    // --- 步驟 2: 如果不是公鑰，則按原邏輯處理地址 ---
 	std::vector<unsigned char> result;
 	string dummy1 = address;
 	int nbDigit = 0;
@@ -415,7 +407,6 @@ void VanitySearch::enumCaseUnsentiveAddress(std::string s, std::vector<std::stri
 
 // ----------------------------------------------------------------------------
 
-// 8891689_MOD: 修正 output 函數，增加默認保存到 found.txt 的邏輯
 void VanitySearch::output(string target, string pAddr, string pAddrHex) {
 
 #ifdef WIN64
@@ -424,13 +415,11 @@ void VanitySearch::output(string target, string pAddr, string pAddrHex) {
 	pthread_mutex_lock(&ghMutex);
 #endif
 
-    // --- 步驟 1: 默認保存到 found.txt ---
     FILE* foundFile = fopen("found.txt", "a");
     if (foundFile == NULL) {
         fprintf(stderr, "\n[WARNING] Could not open found.txt for writing.\n");
     }
 
-	// --- -o 參數文件處理邏輯  ---
 	FILE* f = stdout;
 	bool needToClose = false;
 
@@ -445,20 +434,18 @@ void VanitySearch::output(string target, string pAddr, string pAddrHex) {
 		}
 	}
 
-    // 手動為十六進制字符串填充前導零
     string paddedHex = pAddrHex;
     if (paddedHex.length() < 64) {
         paddedHex.insert(0, 64 - paddedHex.length(), '0');
     }
 
-    // --- 步驟 2: 格式化輸出內容 ---
     stringstream ss;
     if (this->searchType == PUBKEY) {
         ss << "\n[!] (Pub): " << target << "\n";
         ss << "[!] (WIF): Compressed:" << pAddr << "\n";
     } else {
         ss << "\n[!] (Add): " << target << "\n";
-        string wif_type = "p2pkh"; // 默認為 p2pkh (壓縮)
+        string wif_type = "p2pkh";
         if(target.length() > 0){
             if (target[0] == '3') wif_type = "p2wpkh-p2sh";
             else if (target.rfind("bc1", 0) == 0) wif_type = "p2wpkh";
@@ -469,25 +456,19 @@ void VanitySearch::output(string target, string pAddr, string pAddrHex) {
 
     string output_str = ss.str();
 
-    // --- 步驟 3: 將內容同時打印到屏幕和文件 ---
-    
-    // 打印到屏幕 (stdout)
 	fprintf(stdout, "\n%s", output_str.c_str());
     fflush(stdout);
 
-    // 寫入到 -o 指定的文件 (暫時不需要)
 	if (f != stdout) {
         fprintf(f, "%s", output_str.c_str());
         fflush(f);
     }
     
-    // 寫入到默認的 found.txt
     if (foundFile != NULL) {
         fprintf(foundFile, "%s", output_str.c_str());
         fflush(foundFile);
     }
 
-    // --- 步驟 4: 關閉文件句柄 ---
 	if (needToClose) {
         fclose(f);
     }
@@ -501,7 +482,6 @@ void VanitySearch::output(string target, string pAddr, string pAddrHex) {
 	pthread_mutex_unlock(&ghMutex);
 #endif
 }
-
 
 void VanitySearch::updateFound() {
 
@@ -746,7 +726,7 @@ void VanitySearch::getGPUStartingKeys(Int& tRangeStart, int stepSize, int groupS
     uint32_t grp_startkeys = nbThread/256;
 
     Int stepThread;
-    // 直接使用傳入的 stepSize (這就是我們想要的修復)
+
     stepThread.SetInt32(stepSize);
 
 	Point Pdouble;
@@ -873,7 +853,6 @@ void VanitySearch::getGPUStartingKeys(Int& tRangeStart, int stepSize, int groupS
 	delete[] p_delta;
 }
 
-// 重寫修改FindKeyGPU 函數
 void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
     bool ok = true;
@@ -887,8 +866,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
     ph->hasStarted = true;
     endOfSearch = false; 
 
-    // ==================== 正確的修復方法：使用標誌位 ====================
-    bool isFirstLoop = true; // 用於判斷是否是第一次循環
+    bool isFirstLoop = true;
 
     while (!endOfSearch) {
 
@@ -907,20 +885,17 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
             fflush(stdout);
         }
 
-        // 保持原有的對象創建邏輯，確保每次循環環境獨立
         GPUEngine g(ph->gpuId, maxFound);
         if (!g.IsInitialised()) {
             fprintf(stderr, "\n[ERROR] Failed to initialize GPU Engine. Exiting thread.\n");
-            break; // 退出循環
+            break;
         }
         
-        // 使用標誌來控制打印，確保只打印一次
         if (isFirstLoop) {
             printf("[+] GPU: %s\n", g.deviceName.c_str());
             fflush(stdout);
         }
         
-        // 設置目標的邏輯也需要保留在循環內
         if (this->searchType == PUBKEY) {
             g.SetTargetPublicKey(this->targetPubKeys);
         } else {
@@ -960,7 +935,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
         ok = g.SetKeys(publicKeys);
         delete[] publicKeys;
         
-        // 同樣使用標誌來控制這句打印
         if (isFirstLoop) {
             double setup_time = Timer::get_tick() - setup_t0;
             printf("[+] Starting keys set in %.2f seconds\n", setup_time);
@@ -1015,7 +989,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
             PrintStats(keys_n_done, ttot, total_keyspace);
         }
         
-        // 在第一次循環結束前，關閉標誌
         isFirstLoop = false;
 
         t_Paused += (Timer::get_tick() - t0);
@@ -1029,9 +1002,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
     ph->isRunning = false;
 }
 
-// 8891689_MOD: 重寫 PrintStats 函數，增加退出判斷
 void VanitySearch::PrintStats(uint64_t keys_n, double ttot, const Int& total_keyspace) {
-    // 8891689_FIX: 如果程序正在關閉，則不打印任何狀態信息
     if (endOfSearch) {
         return;
     }
@@ -1053,7 +1024,6 @@ void VanitySearch::PrintStats(uint64_t keys_n, double ttot, const Int& total_key
          printf("[+] [GPU %.2f Mkey/s][Total 2^%.2f][Prob %.1e%%][50%% in %s] \r",
                speed, log_keys, prob * 100.0, time_str_50.c_str(), nbFoundKey);
     } else {
-        // 8891689_FIX: 為了美觀，在百分比後面加個空格
         printf("[+] [GPU %.2f Mkey/s][Total 2^%.2f][Prob %.2f%%][50%% in %s] \r",
                speed, log_keys, prob * 100.0, time_str_50.c_str(), nbFoundKey);
     }
@@ -1129,7 +1099,6 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 	TH_PARAM* params = (TH_PARAM*)malloc(numGPUs * sizeof(TH_PARAM));
 	memset(params, 0, numGPUs * sizeof(TH_PARAM));
 	
-	// 8891689_FIX: 確保動態分配的線程數組被釋放
 	std::thread* threads = new std::thread[numGPUs];
 
 #ifdef WIN64
@@ -1140,13 +1109,12 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 	mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
-	// 啟動 GPU 線程
 	for (int i = 0; i < numGPUs; i++) {
 		params[i].obj = this;
 		params[i].threadId = i;
 		params[i].isRunning = true;
 		params[i].gpuId = gpuId[i];
-		// gridSize 可以在這裡設置，如果需要的話
+
 		params[i].gridSizeX = gridSize[i*2];
 		params[i].gridSizeY = gridSize[i*2+1];
 		params[i].THnextKey.Set(&bc->ksNext);
@@ -1154,18 +1122,14 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 		threads[i] = std::thread(_FindKeyGPU, params + i);
 	}
 
-    // 等待所有線程啟動
 	while (!hasStarted(params)) {
 		Timer::SleepMillis(500);
 	}
 
-    // 主線程在這裡等待，直到 endOfSearch 被設置為 true
 	while (!endOfSearch) {
 		Timer::SleepMillis(100);
 	}
 
-    // 8891689_FIX: 這是解決問題的關鍵！
-    // 等待所有 GPU 線程執行完它們的清理工作（包括最後的 saveBackup）
     for (int i = 0; i < numGPUs; i++) {
         if (threads[i].joinable()) {
             threads[i].join();
@@ -1175,7 +1139,6 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 	if (params != nullptr) {
 		free(params);
 	}
-    // 8891689_FIX: 釋放線程數組內存
     delete[] threads;
 }
 
