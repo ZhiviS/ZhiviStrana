@@ -1,4 +1,20 @@
 // main.cpp
+/*
+ * This file is part of the VanitySearch distribution (https://github.com/JeanLucPons/VanitySearch).
+ * Copyright (c) 2019 Jean Luc PONS.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <sstream> 
 #include "Timer.h"
 #include "Vanity.h"
@@ -10,11 +26,11 @@
 #include <thread>
 #include <atomic>
 #include <iostream>
-#include "MyLogic/MyLogic.h"
 #include <vector>
 #include <csignal>
-#include <algorithm> 
+#include <algorithm> // 把这行加在这里
 
+// 8891689_FIX: 引入 CUDA runtime 頭文件以檢查 GPU 設備
 #include <cuda_runtime.h> 
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -26,7 +42,7 @@
 #include <stdlib.h>
 #endif
 
-// --------------------------------------
+// ------------------- 修改鍵盤監聽和全局變量  -------------------
 std::atomic<bool> Pause(false);
 std::atomic<bool> Paused(false);
 std::atomic<bool> stopMonitorKey(false);
@@ -40,26 +56,24 @@ using namespace std;
 VanitySearch* g_vanity_search_ptr = nullptr;
 std::atomic<bool> g_shutdown_initiated(false);
 
-void signalHandler(int signum)
-{
+void signalHandler(int signum) {
     if (!backupMode) {
-        printf("\n");
-        fflush(stdout);
+        printf("\n"); 
+        fflush(stdout); 
         exit(signum);
     }
 
     if (g_shutdown_initiated.exchange(true)) {
         exit(signum);
     }
-
+    
     cout << "\n[!] Ctrl+C Detected. Shutting down gracefully, please wait...";
     cout.flush();
-
+    
     if (g_vanity_search_ptr != nullptr) {
         g_vanity_search_ptr->endOfSearch = true;
     }
 }
-
 
 #if defined(_WIN32) || defined(_WIN64)
 void monitorKeypress() {
@@ -103,7 +117,7 @@ void monitorKeypress() {
 }
 #endif
 
-// --------------------------------------
+// ------------------- 修改輔助函數 -------------------
 
 void printHelp() {
     printf("Usage: ./kk -r <bits> [-a <b58_addr> | -p <pubkey> | -i <file>] [options]\n\n");
@@ -150,22 +164,10 @@ bool loadBackup(int& idxcount, double& t_Paused, int gpuid) {
     return false;
 }
 
-// ------------------- Main -------------------
+// ------------------- Main 函數 (核心修改區) -------------------
 
-int main(int argc, char* argv[])
-{
+int main(int argc, char* argv[]) {
     signal(SIGINT, signalHandler);
-
-    Config cfg;
-    if (!cfg.Load("config.txt")) {
-        std::cerr << "Cannot load config.txt\n";
-        return 1;
-    }
-
-    RunMyLogic(cfg);
-
-    return 0;
-}
 
 #if !(defined(_WIN32) || defined(_WIN64))
     atexit(restoreTerminalMode);
@@ -183,11 +185,12 @@ int main(int argc, char* argv[])
     
     string target_address;
     string target_pubkey;
-    string input_filename; 
+    string input_filename; // 用於存儲 -i 參數的文件名
     int bits = 0;
-    int gpuId = 0; 
+    int gpuId = 0; // 默認使用 GPU 0
     uint32_t maxFound = 65536 * 4;
 
+    // 參數解析循環
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -202,7 +205,7 @@ int main(int argc, char* argv[])
         } else if (arg == "-p") {
             if (i + 1 < argc) { target_pubkey = argv[++i]; }
             else { fprintf(stderr, "[ERROR] A public key hex string is required after the -p parameter.\n"); exit(-1); }
-        } else if (arg == "-i") { 
+        } else if (arg == "-i") { // 處理 -i 參數
             if (i + 1 < argc) { input_filename = argv[++i]; }
             else { fprintf(stderr, "[ERROR] A filename is required after the -i parameter.\n"); exit(-1); }
         } else if (arg == "-r") {
@@ -218,6 +221,7 @@ int main(int argc, char* argv[])
         }
     }
     
+    // 參數驗證邏輯
     if ((target_address.empty() && target_pubkey.empty() && input_filename.empty()) || bits == 0) {
         fprintf(stderr, "[ERROR] A target source (-a, -p, or -i) and range (-r) must be specified.\n");
         printHelp();
@@ -260,15 +264,15 @@ int main(int argc, char* argv[])
     string search_target_display; 
 
     if (!input_filename.empty()) {
-		
-        ifstream infile(input_filename.c_str()); 
+        // 從文件讀取目標
+        ifstream infile(input_filename.c_str()); //  核心修正
         if (!infile.is_open()) {
             fprintf(stderr, "[ERROR] Could not open target file: %s\n", input_filename.c_str());
             exit(-1);
         }
         string line;
         while (getline(infile, line)) {
-
+            // 簡單處理，移除可能的空行或僅包含空白的行
             if (!line.empty() && line.find_first_not_of(" \t\r\n") != string::npos) {
                 target_vector.push_back(line);
             }
@@ -280,6 +284,7 @@ int main(int argc, char* argv[])
             exit(-1);
         }
         
+        // 在處理前對原始地址/公鑰字符串列表進行去重
         printf("[+] Original targets from file: %zu\n", target_vector.size());
         std::sort(target_vector.begin(), target_vector.end());
         auto last = std::unique(target_vector.begin(), target_vector.end());
@@ -289,11 +294,11 @@ int main(int argc, char* argv[])
         search_target_display = "from file '" + input_filename + "'";
 
     } else if (!target_pubkey.empty()) {
-
+        // 單個公鑰目標
         target_vector.push_back(target_pubkey);
         search_target_display = target_pubkey;
     } else {
-
+        // 單個地址目標
         target_vector.push_back(target_address);
         search_target_display = target_address;
     }

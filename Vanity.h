@@ -1,5 +1,21 @@
 // Vanity.h
 
+/*
+ * This file is part of the VanitySearch distribution (https://github.com/JeanLucPons/VanitySearch).
+ * Copyright (c) 2019 Jean Luc PONS.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #ifndef VANITYH
 #define VANITYH
 
@@ -12,18 +28,20 @@
 #include <Windows.h>
 #endif
 
+// 8891689_MOD: 將 PUBKEY 宏定義移動到這裡，確保全局可見
 #define P2PKH  0
 #define P2SH   1
 #define BECH32 2
 #define PUBKEY 3
 
+// 這些全局變量需要在 main.cpp 中定義
 extern std::atomic<bool> Pause;
 extern std::atomic<bool> Paused;
 extern int idxcount;
 extern double t_Paused;
 extern bool randomMode;
 extern bool backupMode;
-extern std::atomic<bool> g_shutdown_initiated; 
+extern std::atomic<bool> g_shutdown_initiated; // 8891689_FIX: 添加 extern 聲明
 
 class VanitySearch;
 
@@ -36,7 +54,7 @@ class VanitySearch;
 #define UNLOCK(mutex) pthread_mutex_unlock(&(mutex));
 #endif
 
-// (TH_PARAM, ADDRESS_ITEM, ADDRESS_TABLE_ITEM) 
+// 結構體定義 (TH_PARAM, ADDRESS_ITEM, ADDRESS_TABLE_ITEM) 
 typedef struct {
 	VanitySearch* obj;
 	int  threadId;
@@ -78,18 +96,23 @@ public:
 	void Search(std::vector<int> gpuId, std::vector<int> gridSize);
 	void FindKeyGPU(TH_PARAM* p);
 
+    // 8891689_FIX: 將 endOfSearch 聲明為 public，以便全局指針訪問
     std::atomic<bool> endOfSearch;
 
 private:
        
+     //  修改區塊 
+    // 5. 用 PubKeyData 的 vector 替換舊的單一目標成員
     std::vector<PubKeyData> targetPubKeys;
     
       
-    bool initAddress(std::string& address, ADDRESS_ITEM* it, int index);
+    bool initAddress(std::string& address, ADDRESS_ITEM* it, int index); //  增加一個 index 參數
       
+    // 8891689_MOD: 存儲解析後的公鑰數據，而不是字符串
     uint64_t targetPubKeyX[4];
     int targetPubKeyParity; // 0 for even, 1 for odd
 
+    // 私有函數
     std::string GetHex(std::vector<unsigned char>& buffer);
     std::string GetExpectedTimeBitCrack(double keyRate, double keyCount, BITCRACK_PARAM* bc);
     bool checkPrivKey(std::string addr, Int& key, int32_t incr, int endomorphism, bool mode);
@@ -121,6 +144,7 @@ private:
 	pthread_mutex_t  ghMutex;	
 #endif	
 
+    // 成員變量
 	Secp256K1* secp;
 	Int startKey;		
 	uint64_t      counters[256];	
