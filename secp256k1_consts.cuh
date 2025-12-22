@@ -2,7 +2,7 @@
 #include <cstdint>
 
 // secp256k1 prime p words
-__device__ void scalar_mul(const Big256 scalar, PointJ* res);
+
 __device__ inline void get_secp256k1_p(uint32_t p[8]) {
     static const uint32_t p_words[8] = {
         0xFFFFFC2Fu, 0xFFFFFFFEu, 0xFFFFFFFFu, 0xFFFFFFFFu,
