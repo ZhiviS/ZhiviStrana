@@ -1,353 +1,194 @@
-// main.cpp
-/*
- * This file is part of the VanitySearch distribution (https://github.com/JeanLucPons/VanitySearch).
- * Copyright (c) 2019 Jean Luc PONS.
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, version 3.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
- */
-#include <sstream> 
-#include "Timer.h"
-#include "Vanity.h"
-#include "SECP256k1.h"
-#include <fstream>
-#include <string>
-#include <string.h>
-#include <stdexcept>
-#include <thread>
-#include <atomic>
-#include <iostream>
-#include <vector>
-#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <chrono>
+#include <cstdint>
 #include <algorithm>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include "secp256k1_math.cuh"
 
-#include <cuda_runtime.h> 
+#define CUDA_CHECK(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA ERROR %d: %s (line %d)\n", (int)err, cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
 
-#if defined(_WIN32) || defined(_WIN64)
-#include <conio.h>
-#else
-#include <termios.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#endif
+typedef uint32_t Big256[8];
 
-// --------------------------------------
-std::atomic<bool> Pause(false);
-std::atomic<bool> Paused(false);
-std::atomic<bool> stopMonitorKey(false);
-int idxcount = 0;
-double t_Paused = 0.0;
-bool randomMode = false;
-bool backupMode = false;
+int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return 0;
+}
 
-using namespace std;
-
-VanitySearch* g_vanity_search_ptr = nullptr;
-std::atomic<bool> g_shutdown_initiated(false);
-
-void signalHandler(int signum) {
-    if (!backupMode) {
-        printf("\n"); 
-        fflush(stdout); 
-        exit(signum);
+bool parse_hex_to_big256(const char* hex_str, Big256 out) {
+    for (int i = 0; i < 8; i++) out[i] = 0;
+    int len = 0;
+    while (hex_str[len] && hex_str[len] != '\r' && hex_str[len] != '\n') len++;
+    int bit_pos = 0;
+    for (int i = len - 1; i >= 0; i--) {
+        int v = hex_val(hex_str[i]);
+        int word_idx = bit_pos / 32;
+        int bit_in_word = bit_pos % 32;
+        if (word_idx >= 8) return false;
+        out[word_idx] |= (uint32_t)(v << bit_in_word);
+        bit_pos += 4;
     }
+    return true;
+}
 
-    if (g_shutdown_initiated.exchange(true)) {
-        exit(signum);
-    }
-    
-    cout << "\n[!] Ctrl+C Detected. Shutting down gracefully, please wait...";
-    cout.flush();
-    
-    if (g_vanity_search_ptr != nullptr) {
-        g_vanity_search_ptr->endOfSearch = true;
+void add256_host(const Big256 a, const Big256 b, Big256 r) {
+    uint64_t carry = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t t = (uint64_t)a[i] + b[i] + carry;
+        r[i] = (uint32_t)t;
+        carry = t >> 32;
     }
 }
 
-#if defined(_WIN32) || defined(_WIN64)
-void monitorKeypress() {
-	while (!stopMonitorKey) {
-		Timer::SleepMillis(1);
-		if (_kbhit()) {
-			char ch = _getch();
-			if (ch == 'p' || ch == 'P') {
-				Pause = !Pause;
-			}
-		}
-	}
-}
-#else
-struct termios original_termios;
-bool terminal_mode_changed = false;
-void restoreTerminalMode() {
-    if (terminal_mode_changed) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &original_termios);
+void mul_uint64_host(const Big256 a, uint64_t b, Big256 r) {
+    for (int i = 0; i < 8; i++) r[i] = 0;
+    uint64_t carry = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t low = (uint64_t)a[i] * (b & 0xFFFFFFFFULL);
+        uint64_t high = (uint64_t)a[i] * (b >> 32);
+        uint64_t t = low + carry;
+        r[i] = (uint32_t)t;
+        carry = (t >> 32) + high;
+    }
+    for (int i = 0; carry && i < 8; i++) {
+        uint64_t t = (uint64_t)r[i] + (carry & 0xFFFFFFFFULL);
+        r[i] = (uint32_t)t;
+        carry = (t >> 32) + (carry >> 32);
     }
 }
-void setupRawTerminalMode() {
-    tcgetattr(STDIN_FILENO, &original_termios);
-    terminal_mode_changed = true;
-    struct termios new_termios = original_termios;
-    new_termios.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
-    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-}
-void monitorKeypress() {
-	while (!stopMonitorKey) {
-		Timer::SleepMillis(1);
-		char ch;
-		if (read(STDIN_FILENO, &ch, 1) > 0) {
-			if (ch == 'p' || ch == 'P') {
-				Pause = !Pause;
-			}
-		}
-	}
-}
-#endif
 
-// --------------------------------------
-
-void printHelp() {
-    printf("Usage: ./kk -r <bits> [-a <b58_addr> | -p <pubkey> | -i <file>] [options]\n\n");
+int main() {
+    printf("=== secp256k1_search START ===\n");
     
-    printf("Modes (choose one):\n");
-    printf("  -a <b58_addr>       Find the private key for a P2PKH Bitcoin address.\n");
-    printf("  -p <pubkey>         Find the private key for a specific public key (hex, compressed format only).\n");
-    printf("  -i <file>           Search for a list of addresses or public keys from a file (one per line).\n\n");
+    Big256 d_min, step;
+    uint64_t num_iters = 0;
+    uint8_t target_prefix = 0;
+    uint8_t target_x_prefix[32] = {0};
+    int prefix_len = 0;
     
-    printf("Keyspace:\n");
-    printf("  -r <bits>           Set the bit range for the search (e.g., 71 for 2^70 to 2^71-1) (required).\n\n");
-    
-    printf("Options:\n");
-    printf("  -R                  Activate random mode.\n");
-    printf("  -b                  Enable backup mode to resume from last progress (not for random mode).\n");
-    printf("  -G <ID>             Specify the GPU ID to use, default is 0.\n");
-    printf("  -h, --help          Display this help message.\n\n");
-
-    printf("Note: When using -i, all targets in the file must be of the same type (all addresses or all public keys).\n\n");
-    
-    printf("Technical Support: gitlab.com/8891689\n");
-    exit(0);
-}
-
-int getInt(string name, char* v) {
-	int r;
-	try { r = std::stoi(string(v)); }
-	catch (std::invalid_argument&) {
-		fprintf(stderr, "[ERROR] Invalid %s argument, number expected\n", name.c_str());
-		exit(-1);
-	}
-	return r;
-}
-
-bool loadBackup(int& idxcount, double& t_Paused, int gpuid) {
-    string filename = "schedule_gpu" + to_string(gpuid) + ".dat";
-    ifstream inFile(filename, std::ios::binary);
-    if (inFile) {
-        inFile.read(reinterpret_cast<char*>(&idxcount), sizeof(idxcount));
-        inFile.read(reinterpret_cast<char*>(&t_Paused), sizeof(t_Paused));
-        inFile.close();
-        return true;
-    }
-    return false;
-}
-
-// ------------------- Main -------------------
-
-int main(int argc, char* argv[]) {
-    signal(SIGINT, signalHandler);
-
-#if !(defined(_WIN32) || defined(_WIN64))
-    atexit(restoreTerminalMode);
-    setupRawTerminalMode();
-#endif
-
-    std::thread inputThread(monitorKeypress);
-    Timer::Init();
-    Secp256K1* secp = new Secp256K1();
-    secp->Init();
-
-    if (argc < 2) {
-        printHelp();
+    FILE* config = fopen("config.txt", "r");
+    if (!config) {
+        printf("ERROR: config.txt not found!\n");
+        return 1;
     }
     
-    string target_address;
-    string target_pubkey;
-    string input_filename;
-    int bits = 0;
-    int gpuId = 0; // GPU 0
-    uint32_t maxFound = 65536 * 4;
-
-    for (int i = 1; i < argc; ++i) {
-        string arg = argv[i];
-        if (arg == "-h" || arg == "--help") {
-            printHelp();
-        } else if (arg == "-b") {
-            backupMode = true;
-        } else if (arg == "-R") {
-            randomMode = true;
-        } else if (arg == "-a") {
-            if (i + 1 < argc) { target_address = argv[++i]; } 
-            else { fprintf(stderr, "[ERROR] An address value is required after the -a parameter.\n"); exit(-1); }
-        } else if (arg == "-p") {
-            if (i + 1 < argc) { target_pubkey = argv[++i]; }
-            else { fprintf(stderr, "[ERROR] A public key hex string is required after the -p parameter.\n"); exit(-1); }
-        } else if (arg == "-i") {
-            if (i + 1 < argc) { input_filename = argv[++i]; }
-            else { fprintf(stderr, "[ERROR] A filename is required after the -i parameter.\n"); exit(-1); }
-        } else if (arg == "-r") {
-            if (i + 1 < argc) {
-                bits = getInt((char*)"-r", argv[++i]);
-                if (bits <= 0 || bits > 256) { fprintf(stderr, "[ERROR] -r value (number of bits) must be between 1 and 256.\n"); exit(-1); }
-            } else { fprintf(stderr, "[ERROR] A numeric value is required after the -r parameter.\n"); exit(-1); }
-        } else if (arg == "-G") {
-            if (i + 1 < argc) gpuId = getInt((char*)"-G", argv[++i]);
-        } else {
-            fprintf(stderr, "[ERROR] Unknown parameter: %s\n", arg.c_str());
-            printHelp();
-        }
-    }
-    
-    if ((target_address.empty() && target_pubkey.empty() && input_filename.empty()) || bits == 0) {
-        fprintf(stderr, "[ERROR] A target source (-a, -p, or -i) and range (-r) must be specified.\n");
-        printHelp();
-    }
-    if (!input_filename.empty() && (!target_address.empty() || !target_pubkey.empty())) {
-        fprintf(stderr, "[ERROR] Cannot use -i with -a or -p. Please choose one target source.\n");
-        printHelp();
-    }
-    if (!target_address.empty() && !target_pubkey.empty()) {
-        fprintf(stderr, "[ERROR] Cannot use -a and -p at the same time. Please choose one.\n");
-        printHelp();
-    }
-    if (backupMode && randomMode) {
-        fprintf(stderr, "[ERROR] Backup mode (-b) cannot be used with random mode (-R).\n");
-        exit(-1);
-    }
-    
-    int deviceCount = 0;
-    cudaError_t err = cudaGetDeviceCount(&deviceCount);
-
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[ERROR] CUDA error while checking for devices: %s\n", cudaGetErrorString(err));
-        fprintf(stderr, "[INFO] Please ensure NVIDIA drivers and CUDA toolkit are installed correctly.\n");
-        exit(-1);
-    }
-
-    if (deviceCount == 0) {
-        fprintf(stdout, "[INFO] No CUDA-enabled GPU was detected. Exiting.\n");
-        exit(0);
-    }
-
-    if (gpuId >= deviceCount || gpuId < 0) {
-        fprintf(stdout, "[INFO] Invalid GPU ID %d specified. No device detected with this ID.\n", gpuId);
-        fprintf(stdout, "[INFO] Detected %d GPU(s). Valid IDs are from 0 to %d.\n", deviceCount, deviceCount - 1);
-        exit(0);
-    }
-
-
-    vector<string> target_vector;
-    string search_target_display; 
-
-    if (!input_filename.empty()) {
-
-        ifstream infile(input_filename.c_str());
-        if (!infile.is_open()) {
-            fprintf(stderr, "[ERROR] Could not open target file: %s\n", input_filename.c_str());
-            exit(-1);
-        }
-        string line;
-        while (getline(infile, line)) {
-
-            if (!line.empty() && line.find_first_not_of(" \t\r\n") != string::npos) {
-                target_vector.push_back(line);
+    printf("Reading config.txt...\n");
+    char line[512];
+    while (fgets(line, sizeof(line), config)) {
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char* key = line;
+        char* val = eq + 1;
+        while (*key == ' ' || *key == '\t') key++;
+        int vlen = strlen(val);
+        while (vlen > 0 && (val[vlen-1] == ' ' || val[vlen-1] == '\t' || 
+               val[vlen-1] == '\r' || val[vlen-1] == '\n')) vlen--;
+        val[vlen] = 0;
+        
+        if (strcmp(key, "target_prefix") == 0) {
+            target_prefix = (uint8_t)strtoul(val, NULL, 16);
+        } else if (strcmp(key, "pub_key_x") == 0) {
+            prefix_len = 0;
+            for (char* p = val; *p && prefix_len < 32; p += 2) {
+                if (!((p[0] >= '0' && p[0] <= '9') || (p[0] >= 'a' && p[0] <= 'f') || (p[0] >= 'A' && p[0] <= 'F')) ||
+                    !((p[1] >= '0' && p[1] <= '9') || (p[1] >= 'a' && p[1] <= 'f') || (p[1] >= 'A' && p[1] <= 'F'))) break;
+                target_x_prefix[prefix_len] = (hex_val(p[0]) << 4) | hex_val(p[1]);
+                prefix_len++;
             }
+        } else if (strcmp(key, "d_min") == 0) {
+            parse_hex_to_big256(val, d_min);
+        } else if (strcmp(key, "step") == 0) {
+            parse_hex_to_big256(val, step);
+        } else if (strcmp(key, "num_iters") == 0) {
+            num_iters = strtoull(val, NULL, 10);
         }
-        infile.close();
-        
-        if (target_vector.empty()) {
-            fprintf(stderr, "[ERROR] Target file '%s' is empty or contains no valid lines.\n", input_filename.c_str());
-            exit(-1);
-        }
-        
-        printf("[+] Original targets from file: %zu\n", target_vector.size());
-        std::sort(target_vector.begin(), target_vector.end());
-        auto last = std::unique(target_vector.begin(), target_vector.end());
-        target_vector.erase(last, target_vector.end());
-        printf("[+] Unique targets after deduplication: %zu\n", target_vector.size());
-
-        search_target_display = "from file '" + input_filename + "'";
-
-    } else if (!target_pubkey.empty()) {
-
-        target_vector.push_back(target_pubkey);
-        search_target_display = target_pubkey;
-    } else {
-
-        target_vector.push_back(target_address);
-        search_target_display = target_address;
     }
-
-    BITCRACK_PARAM bitcrack, *bc;
-    bc = &bitcrack;
-    bc->ksStart.SetInt32(1);
-    if (bits > 1) {
-        bc->ksStart.ShiftL(bits - 1);
-    }
-    bc->ksFinish.SetInt32(1);
-    bc->ksFinish.ShiftL(bits);
-    bc->ksFinish.SubOne();
-    bc->ksNext.Set(&bc->ksStart);
-
-    if (backupMode) {
-        if (loadBackup(idxcount, t_Paused, gpuId)) {
-            printf("[+] Restoring from backup was successful. Starting batch: %d, Elapsed time: %.2f s.\n", idxcount, t_Paused);
-        } else {
-            printf("[+] Backup file not found. Will start from scratch.\n");
-        }
+    fclose(config);
+    
+    printf("Config: num_iters=%llu, prefix_len=%d, target=%02x\n", num_iters, prefix_len, target_prefix);
+    if (num_iters == 0 || prefix_len == 0) {
+        printf("ERROR: Invalid config\n");
+        return 1;
     }
     
-    printf("[+] KeyKiller v.007\n");
-    if (!target_pubkey.empty()) {
-        printf("[+] Search: %s [Public Key]\n", search_target_display.c_str());
-    } else if (!input_filename.empty()) {
-        printf("[+] Search: %zu targets %s\n", target_vector.size(), search_target_display.c_str());
-    }
-    else {
-        printf("[+] Search: %s [P2PKH/Compressed]\n", search_target_display.c_str());
-    }
-    time_t now = time(NULL);
-    printf("[+] Start %s", ctime(&now));
-    if (randomMode) printf("[+] Random mode\n");
-    printf("[+] Range (2^%d)\n", bits);
-    printf("[+] from : 0x%s\n", bc->ksStart.GetBase16().c_str());
-    printf("[+] to   : 0x%s\n", bc->ksFinish.GetBase16().c_str());
-    fflush(stdout);
-
-    VanitySearch* v = new VanitySearch(secp, target_vector, SEARCH_COMPRESSED, true, "", maxFound, bc);
-    g_vanity_search_ptr = v; 
-    vector<int> gpuIds = { gpuId };
-    vector<int> gridSizes = { -1, 128 }; 
+    const int threads_per_block = 256;
+    const int max_batch_size = 1024 * 1024;  // 1M keys!
+    int num_batches = (num_iters + max_batch_size - 1LL) / max_batch_size;
     
-    v->Search(gpuIds, gridSizes);
-
-    stopMonitorKey = true;
-    if (inputThread.joinable()) {
-        inputThread.join();
+    printf("GPU setup: %d batches of %d keys\n", num_batches, max_batch_size);
+    
+    Big256* d_priv_batch;
+    uint8_t* d_target_x;
+    unsigned long long* d_matches;
+    CUDA_CHECK(cudaMalloc(&d_priv_batch, max_batch_size * sizeof(Big256)));
+    CUDA_CHECK(cudaMalloc(&d_target_x, 32));
+    CUDA_CHECK(cudaMalloc(&d_matches, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemcpy(d_target_x, target_x_prefix, prefix_len, cudaMemcpyHostToDevice));
+    
+    unsigned long long h_total_matches = 0;
+    auto t_start = std::chrono::high_resolution_clock::now();
+    
+    printf("Starting search...\n");
+    for (int batch = 0; batch < num_batches; batch++) {
+        uint64_t batch_start = (uint64_t)batch * max_batch_size;
+        uint64_t batch_end = std::min(batch_start + max_batch_size, num_iters);
+        int batch_size = (int)(batch_end - batch_start);
+        
+        // DYNAMIC MALLOC - работает с 1M!
+        Big256* h_priv_batch = (Big256*)malloc(batch_size * sizeof(Big256));
+        if (!h_priv_batch) {
+            printf("ERROR: malloc failed for batch %d\n", batch);
+            exit(1);
+        }
+        
+        for (int i = 0; i < batch_size; i++) {
+            uint64_t idx = batch_start + i;
+            Big256 idx_step;
+            mul_uint64_host(step, idx, idx_step);
+            add256_host(d_min, idx_step, h_priv_batch[i]);
+        }
+        
+        CUDA_CHECK(cudaMemcpy(d_priv_batch, h_priv_batch, batch_size * sizeof(Big256), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(d_matches, 0, sizeof(unsigned long long)));
+        
+        dim3 blocks((batch_size + threads_per_block - 1) / threads_per_block);
+        dim3 threads(threads_per_block);
+        search_pubkeys<<<blocks, threads>>>(d_priv_batch, target_prefix, d_target_x, prefix_len, d_matches);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        unsigned long long batch_matches;
+        CUDA_CHECK(cudaMemcpy(&batch_matches, d_matches, sizeof(unsigned long long), cudaMemcpyDeviceToHost));
+        h_total_matches += batch_matches;
+        
+        printf("Batch %d/%d: %llu matches\r", batch, num_batches, batch_matches);
+        fflush(stdout);
+        
+        free(h_priv_batch);  // FREE MEMORY!
     }
-    printf("\n");
-    delete v;
-    delete secp;
+    
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double seconds = std::chrono::duration<double>(t_end - t_start).count();
+    
+    printf("\n\n=== RESULTS ===\n");
+    printf("Total iterations: %llu\n", num_iters);
+    printf("Matches found: %llu\n", h_total_matches);
+    printf("Speed: %.2f Mkeys/sec\n", num_iters / seconds / 1e6);
+    printf("Total time: %.2f sec\n", seconds);
+    
+    CUDA_CHECK(cudaFree(d_priv_batch));
+    CUDA_CHECK(cudaFree(d_target_x));
+    CUDA_CHECK(cudaFree(d_matches));
+    
+    printf("=== DONE ===\n");
     return 0;
 }
