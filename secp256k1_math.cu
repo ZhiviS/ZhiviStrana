@@ -9,7 +9,6 @@ typedef uint32_t Big256[8];
 typedef uint32_t Big512[16];
 
 // Point in Jacobian coordinates
-typedef struct { Big256 X, Y, Z; } PointJ;
 
 // --- Big256 helpers ---
 __device__ inline void big256_set_zero(Big256 a) { 
@@ -242,54 +241,78 @@ __device__ inline void scalar_mul(const Big256 scalar, PointJ* res) {
     *res = R;
 }
 
-// --- Search kernel ---
-extern "C" __global__ void search_pubkeys(
-    const Big256* priv_keys,      // input private keys batch
-    uint8_t target_prefix,        // 0x02 or 0x03
-    const uint8_t* target_x_prefix, // X prefix bytes
-    int prefix_len,               // prefix length in bytes
-    unsigned long long* matches   // atomic match counter
+// --- New fast incremental search kernel ---
+extern "C" __global__ void search_kernel_incremental(
+    PointJ base_pub_jac_in,                 // начальный pub = d_min * G (Jacobian)
+    const Big256 step,                      // шаг (обычно 1, но может быть любой)
+    uint64_t start_offset,                  // с какого глобального шага начинаем
+    uint64_t iterations_per_thread,         // сколько шагов делает каждый thread
+    const uint8_t* d_target_x_prefix,       // префикс X-координаты
+    int prefix_len,                         // длина префикса в байтах
+    uint8_t target_prefix,                  // 0x02 или 0x03
+    unsigned long long* d_matches           // счётчик совпадений
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= blockDim.x * gridDim.x) return;
-    
-    // ИСПРАВЛЕНО: ручное копирование массива
-    Big256 priv;
-    for (int i = 0; i < 8; i++) priv[i] = priv_keys[idx][i];
-    
-    // Compute public key: scalar_mul(G, priv)
-    PointJ pub_jac;
-    scalar_mul(priv, &pub_jac);
-    
-    Big256 pub_x, pub_y;
-    from_jacobian(&pub_jac, pub_x, pub_y);
-    
-    // Compressed format: prefix(1) + X(32)
-    uint8_t pubkey[33];
-    pubkey[0] = (pub_y[0] & 1) ? 0x03 : 0x02;
-    
-    // X big-endian
-    for (int i = 0; i < 8; ++i) {
-        uint32_t word = pub_x[7 - i];
-        pubkey[1 + i * 4 + 0] = (word >> 24) & 0xFF;
-        pubkey[1 + i * 4 + 1] = (word >> 16) & 0xFF;
-        pubkey[1 + i * 4 + 2] = (word >>  8) & 0xFF;
-        pubkey[1 + i * 4 + 3] =  word        & 0xFF;
-    }
-    
-    // Filter 1: prefix match
-    if (pubkey[0] != target_prefix) return;
-    
-    // Filter 2: X prefix match
-    bool x_match = true;
-    for (int i = 0; i < prefix_len; i++) {
-        if (pubkey[1 + i] != target_x_prefix[i]) {
-            x_match = false;
-            break;
+    uint64_t thread_id = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t total_threads = (uint64_t)gridDim.x * blockDim.x;
+
+    // Локальная копия текущей точки
+    PointJ pub = base_pub_jac_in;
+
+    // Предвычисляем точку step*G один раз на thread
+    PointJ step_point;
+    scalar_mul(step, &step_point);
+
+    // Пропускаем начальные шаги: pub += start_offset * (step*G)
+    uint64_t offset = start_offset * total_threads + thread_id;
+    PointJ temp = pub;
+    for (int bit = 63; bit >= 0; --bit) {
+        jacobian_double(&temp, &temp);
+        if ((offset >> bit) & 1ULL) {
+            jacobian_add(&temp, &step_point, &temp);
         }
     }
-    
-    if (x_match) {
-        atomicAdd(matches, 1ULL);
+    pub = temp;
+
+    // Основной цикл поиска
+    for (uint64_t i = 0; i < iterations_per_thread; ++i) {
+        // Конвертируем Jacobian → affine
+        Big256 pub_x, pub_y;
+        from_jacobian(&pub, pub_x, pub_y);
+
+        // Формируем compressed pubkey: 0x02/0x03 + X (32 байта big-endian)
+        uint8_t pubkey[33];
+        pubkey[0] = (pub_y[0] & 1) ? 0x03 : 0x02;
+
+        for (int w = 0; w < 8; ++w) {
+            uint32_t word = pub_x[7 - w];
+            pubkey[1 + w*4 + 0] = (word >> 24) & 0xFF;
+            pubkey[1 + w*4 + 1] = (word >> 16) & 0xFF;
+            pubkey[1 + w*4 + 2] = (word >> 8)  & 0xFF;
+            pubkey[1 + w*4 + 3] = word & 0xFF;
+        }
+
+        // Быстрая проверка префикса
+        if (pubkey[0] == target_prefix) {
+            bool match = true;
+            for (int b = 0; b < prefix_len; ++b) {
+                if (pubkey[1 + b] != d_target_x_prefix[b]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                atomicAdd(d_matches, 1ULL);
+            }
+        }
+
+        // Следующий ключ: pub += step*G
+        jacobian_add(&pub, &step_point, &pub);
+    }
+}
+
+// Kernel для вычисления base_pub = d_min * G один раз на GPU
+__global__ void init_base_pub_kernel(const Big256 d_min, PointJ* out_base_pub) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        scalar_mul(d_min, out_base_pub);
     }
 }
